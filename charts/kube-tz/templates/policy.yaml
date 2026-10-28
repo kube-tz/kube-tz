@@ -1,0 +1,272 @@
+{{- /*
+kube-tz: MutatingAdmissionPolicy + Binding that inject a timezone into Pods.
+Requires Kubernetes >= 1.36 for admissionregistration.k8s.io/v1.
+*/ -}}
+
+{{- $defaultTimezone := .Values.timezone | default "Asia/Kolkata" -}}
+
+{{- /* ---------------- Policy ---------------- */ -}}
+{{- $policy := .Values.policy | default (dict) -}}
+{{- $apiVersion := get $policy "apiVersion" | default "admissionregistration.k8s.io/v1" -}}
+{{- $policyName := get $policy "policyName" | default (include "kube-tz.policyName" .) -}}
+{{- $bindingName := get $policy "bindingName" | default (include "kube-tz.bindingName" .) -}}
+{{- $injectKey := get $policy "injectAnnotationKey" | default "kube-tz.io/inject" -}}
+{{- $timezoneKey := get $policy "timezoneAnnotationKey" | default "kube-tz.io/name" -}}
+{{- $statusKey := get $policy "statusAnnotationKey" | default "kube-tz.io/status" -}}
+{{- $injectedTimezoneKey := get $policy "injectedTimezoneAnnotationKey" | default "kube-tz.io/injected-timezone" -}}
+{{- $failurePolicy := get $policy "failurePolicy" | default "Fail" -}}
+{{- $reinvocationPolicy := get $policy "reinvocationPolicy" | default "IfNeeded" -}}
+{{- $operations := get $policy "operations" | default (list "CREATE") -}}
+{{- $allowedOSNames := get $policy "allowedOSNames" | default (list "linux") -}}
+{{- $validateTimezone := dig "validateTimezone" true $policy -}}
+{{- $timezonePattern := get $policy "timezonePattern" | default "^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*$" -}}
+
+{{- /* Render-time validation: fail early with a readable message. */ -}}
+{{- if not (has $failurePolicy (list "Fail" "Ignore")) -}}
+  {{- fail (printf "policy.failurePolicy must be Fail or Ignore, got %q" $failurePolicy) -}}
+{{- end -}}
+{{- if not (has $reinvocationPolicy (list "Never" "IfNeeded")) -}}
+  {{- fail (printf "policy.reinvocationPolicy must be Never or IfNeeded, got %q" $reinvocationPolicy) -}}
+{{- end -}}
+{{- if and $validateTimezone (not (regexMatch $timezonePattern $defaultTimezone)) -}}
+  {{- fail (printf "timezone %q does not match policy.timezonePattern %q" $defaultTimezone $timezonePattern) -}}
+{{- end -}}
+
+{{- /* ---------------- Image ---------------- */ -}}
+{{- $image := .Values.image | default (dict) -}}
+{{- $imageRepo := required "image.repository is required" (get $image "repository") -}}
+{{- $imageTag := get $image "tag" | default .Chart.AppVersion | toString -}}
+{{- $imagePullPolicy := get $image "pullPolicy" | default "IfNotPresent" -}}
+{{- $zoneInfoPath := get $image "zoneInfoPath" | default "/opt/tzdata/usr/share/zoneinfo" -}}
+{{- $imageRef := printf "%s:%s" $imageRepo $imageTag -}}
+
+{{- /* pullSecrets accepts ["name"] or [{name: "name"}] */ -}}
+{{- $pullSecrets := list -}}
+{{- range (get $image "pullSecrets" | default (list)) -}}
+  {{- if kindIs "string" . -}}
+    {{- $pullSecrets = append $pullSecrets . -}}
+  {{- else -}}
+    {{- $pullSecrets = append $pullSecrets (required "image.pullSecrets entries must be a string or {name: ...}" .name) -}}
+  {{- end -}}
+{{- end -}}
+
+{{- /* ---------------- hostPath mode ---------------- */ -}}
+{{- $hostPath := .Values.hostPath | default (dict) -}}
+{{- $hostPathEnabled := dig "enabled" false $hostPath -}}
+{{- $hostPathPath := get $hostPath "path" | default "/usr/share/zoneinfo" -}}
+{{- $hostPathType := get $hostPath "type" | default "Directory" -}}
+{{- $hostPathVolumeName := "kube-tz-hostpath" -}}
+{{- $hostPathMount := "/zoneinfo" -}}
+
+{{- /* ---------------- Shared volume ---------------- */ -}}
+{{- $volume := .Values.volume | default (dict) -}}
+{{- $volumeName := get $volume "name" | default "kube-tz" -}}
+{{- $zoneInfoMountPath := get $volume "zoneInfoMountPath" | default "/usr/share/zoneinfo" -}}
+{{- $localtimeMountPath := get $volume "localtimeMountPath" | default "/etc/localtime" -}}
+{{- $sizeLimit := get $volume "sizeLimit" | default "32Mi" -}}
+
+{{- /* ---------------- Init container ---------------- */ -}}
+{{- $init := .Values.init | default (dict) -}}
+{{- $initName := get $init "name" | default "kube-tz" -}}
+{{- $cpuRequest := dig "resources" "requests" "cpu" "5m" $init -}}
+{{- $memoryRequest := dig "resources" "requests" "memory" "8Mi" $init -}}
+{{- $cpuLimit := dig "resources" "limits" "cpu" "50m" $init -}}
+{{- $memoryLimit := dig "resources" "limits" "memory" "32Mi" $init -}}
+{{- $scAllowPrivEsc := dig "securityContext" "allowPrivilegeEscalation" false $init -}}
+{{- $scReadOnlyRoot := dig "securityContext" "readOnlyRootFilesystem" true $init -}}
+{{- $scRunAsNonRoot := dig "securityContext" "runAsNonRoot" true $init -}}
+{{- $scRunAsUser := dig "securityContext" "runAsUser" 65532 $init -}}
+{{- $scRunAsGroup := dig "securityContext" "runAsGroup" 65532 $init -}}
+{{- $scCapDrop := dig "securityContext" "capabilities" "drop" (list "ALL") $init -}}
+{{- $scSeccomp := dig "securityContext" "seccompProfile" "type" "RuntimeDefault" $init -}}
+
+{{- $zoneInfoSrc := ternary $hostPathMount $zoneInfoPath $hostPathEnabled -}}
+
+{{- /* Default init script: validate the zone exists, then copy the whole tree into the emptyDir (/work). */ -}}
+
+{{- $defaultInitScript := `set -eu
+if [ ! -f "${ZONEINFO_SRC}/${TIMEZONE}" ]; then
+  echo "kube-tz: unknown timezone '${TIMEZONE}'" >&2
+  exit 1
+fi
+for entry in "${ZONEINFO_SRC}"/*; do
+  cp -RL "${entry}" /work/ || echo "kube-tz: warning: skipped '${entry}'" >&2
+done
+if [ ! -f "/work/${TIMEZONE}" ]; then
+  echo "kube-tz: failed to copy timezone '${TIMEZONE}'" >&2
+  exit 1
+fi` -}}
+{{- $initCommand := get $init "command" | default (list) -}}
+{{- if not $initCommand -}}
+  {{- $initCommand = list "/bin/sh" "-c" $defaultInitScript -}}
+{{- end -}}
+
+{{- $injectIntoInitContainers := .Values.injectIntoInitContainers | default false -}}
+
+{{- /* ---------------- Namespace targeting ---------------- */ -}}
+{{- $namespaces := .Values.namespaces | default (dict) -}}
+{{- $nsInclude := get $namespaces "include" | default (list) -}}
+{{- $nsExclude := get $namespaces "exclude" | default (list) -}}
+{{- $nsSelector := get $namespaces "selector" | default (dict) -}}
+{{- $nsLabelKey := get $namespaces "nameLabelKey" | default "kubernetes.io/metadata.name" -}}
+
+{{- /* ---------------- Contexts for the CEL helpers ---------------- */ -}}
+{{- $initCtx := dict
+      "initName" $initName
+      "imageRef" $imageRef
+      "imagePullPolicy" $imagePullPolicy
+      "initCommand" $initCommand
+      "zoneInfoSrc" $zoneInfoSrc
+      "hostPathEnabled" $hostPathEnabled
+      "hostPathVolumeName" $hostPathVolumeName
+      "hostPathMount" $hostPathMount
+      "volumeName" $volumeName
+      "cpuRequest" $cpuRequest
+      "memoryRequest" $memoryRequest
+      "cpuLimit" $cpuLimit
+      "memoryLimit" $memoryLimit
+      "scAllowPrivEsc" $scAllowPrivEsc
+      "scReadOnlyRoot" $scReadOnlyRoot
+      "scRunAsNonRoot" $scRunAsNonRoot
+      "scRunAsUser" $scRunAsUser
+      "scRunAsGroup" $scRunAsGroup
+      "scCapDrop" $scCapDrop
+      "scSeccomp" $scSeccomp -}}
+{{- $containersCtx := dict
+      "field" "containers"
+      "excludeName" ""
+      "volumeName" $volumeName
+      "zoneInfoMountPath" $zoneInfoMountPath
+      "localtimeMountPath" $localtimeMountPath -}}
+{{- $initContainersCtx := dict
+      "field" "initContainers"
+      "excludeName" $initName
+      "volumeName" $volumeName
+      "zoneInfoMountPath" $zoneInfoMountPath
+      "localtimeMountPath" $localtimeMountPath -}}
+apiVersion: {{ $apiVersion }}
+kind: MutatingAdmissionPolicy
+metadata:
+  name: {{ $policyName | quote }}
+  labels:
+    {{- include "kube-tz.labels" . | nindent 4 }}
+spec:
+  failurePolicy: {{ $failurePolicy }}
+  reinvocationPolicy: {{ $reinvocationPolicy }}
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: {{ toJson $operations }}
+        resources: ["pods"]
+        scope: Namespaced
+  matchConditions:
+    - name: injection-not-disabled
+      expression: >-
+        !has(object.metadata.annotations) ||
+        !({{ $injectKey | quote }} in object.metadata.annotations) ||
+        object.metadata.annotations[{{ $injectKey | quote }}] != "disabled"
+    - name: linux-pod-only
+      expression: >-
+        !has(object.spec.os) || !has(object.spec.os.name) ||
+        object.spec.os.name in {{ toJson $allowedOSNames }}
+  variables:
+    - name: timezone
+      expression: >-
+        string(has(object.metadata.annotations) &&
+        {{ $timezoneKey | quote }} in object.metadata.annotations
+        ? object.metadata.annotations[{{ $timezoneKey | quote }}]
+        : {{ $defaultTimezone | quote }})
+    - name: timezoneValid
+      expression: >-
+        {{- if $validateTimezone }}
+        size(variables.timezone) <= 64 &&
+        variables.timezone.matches({{ $timezonePattern | quote }})
+        {{- else }}
+        true
+        {{- end }}
+    - name: hasInit
+      expression: >-
+        object.spec.?initContainers.orValue([]).exists(c, c.name == {{ $initName | quote }})
+  mutations:
+    # 1) Insert the kube-tz init container at index 0 so it runs before any other init container.
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: |-
+          !variables.timezoneValid || variables.hasInit
+            ? []
+            : (object.spec.?initContainers.hasValue()
+                ? []
+                : [JSONPatch{op: "add", path: "/spec/initContainers", value: []}]) +
+              [JSONPatch{
+                op: "add",
+                path: "/spec/initContainers/0",
+                value: {{ include "kube-tz.cel.initContainer" $initCtx | nindent 18 }}
+              }]
+    # 2) Merge volumes, env, mounts, pull secrets and annotations (server-side-apply semantics).
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: |-
+          Object{
+            metadata: Object.metadata{
+              annotations: {
+                {{ $statusKey | quote }}: (variables.timezoneValid ? "injected" : "skipped-invalid-timezone"),
+                {{ $injectedTimezoneKey | quote }}: string(variables.timezone)
+              }
+            },
+            spec: (variables.timezoneValid
+              ? Object.spec{
+                  volumes: [
+                    Object.spec.volumes{
+                      name: {{ $volumeName | quote }},
+                      emptyDir: Object.spec.volumes.emptyDir{sizeLimit: {{ $sizeLimit | quote }}}
+                    }
+                    {{- if $hostPathEnabled }},
+                    Object.spec.volumes{
+                      name: {{ $hostPathVolumeName | quote }},
+                      hostPath: Object.spec.volumes.hostPath{path: {{ $hostPathPath | quote }}, type: {{ $hostPathType | quote }}}
+                    }
+                    {{- end }}
+                  ],
+                  containers: {{ include "kube-tz.cel.mapContainers" $containersCtx | nindent 20 }}
+                  {{- if $pullSecrets }},
+                  imagePullSecrets: [
+                    {{- range $i, $s := $pullSecrets }}{{ if $i }},{{ end }}
+                    Object.spec.imagePullSecrets{name: {{ $s | quote }}}
+                    {{- end }}
+                  ]
+                  {{- end }}
+                  {{- if $injectIntoInitContainers }},
+                  initContainers: {{ include "kube-tz.cel.mapContainers" $initContainersCtx | nindent 20 }}
+                  {{- end }}
+                }
+              : Object.spec{})
+          }
+---
+apiVersion: {{ $apiVersion }}
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: {{ $bindingName | quote }}
+  labels:
+    {{- include "kube-tz.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $policyName | quote }}
+{{- if or $nsInclude $nsExclude $nsSelector }}
+  matchResources:
+    namespaceSelector:
+{{- if $nsSelector }}
+      {{- toYaml $nsSelector | nindent 6 }}
+{{- else }}
+      matchExpressions:
+{{- if $nsInclude }}
+        - key: {{ $nsLabelKey | quote }}
+          operator: In
+          values: {{ toJson $nsInclude }}
+{{- end }}
+{{- if $nsExclude }}
+        - key: {{ $nsLabelKey | quote }}
+          operator: NotIn
+          values: {{ toJson $nsExclude }}
+{{- end }}
+{{- end }}
+{{- end }}

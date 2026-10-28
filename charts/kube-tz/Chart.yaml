@@ -1,0 +1,28 @@
+apiVersion: v2
+name: kube-tz
+description: Webhook-free timezone injection for Kubernetes workloads using MutatingAdmissionPolicy.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+icon: https://github.com/kube-tz/kube-tz/raw/main/assets/kube-tz-logo.png
+sources:
+  - https://github.com/kube-tz/kube-tz
+keywords:
+  - timezone
+  - timezones
+  - admission
+  - policy
+  - tzdata
+  - tzdb
+  - tz
+  - mutatingadmissionpolicy
+  - cel
+annotations:
+  artifacthub.io/changes: |
+    - kind: "added"
+      description: "initial chart"
+  artifacthub.io/links: |
+    - name: "source"
+      url: "https://github.com/kube-tz/kube-tz"
+  artifacthub.io/license: "Apache-2.0"
+kubeVersion: ">=1.36.0-0"

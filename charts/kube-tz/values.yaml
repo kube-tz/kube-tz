@@ -1,0 +1,128 @@
+# Default values for kube-tz.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Default timezone injected into every matching Pod (IANA name, e.g. "Asia/Kolkata", "UTC").
+# Can be overridden per Pod with the annotation configured in policy.timezoneAnnotationKey.
+timezone: "Asia/Kolkata"
+
+nameOverride: ""
+fullnameOverride: ""
+
+policy:
+  # apiVersion of the MutatingAdmissionPolicy / Binding objects.
+  # v1 is GA from Kubernetes 1.36. Use "admissionregistration.k8s.io/v1beta1" only on 1.34/1.35
+  # clusters where the MutatingAdmissionPolicy feature gate and beta API are explicitly enabled.
+  apiVersion: "admissionregistration.k8s.io/v1"
+
+  # Leave empty to derive from the release name.
+  policyName: ""
+  bindingName: ""
+
+  # Pod annotations
+  injectAnnotationKey: "kube-tz.io/inject"             # set to "disabled" on a Pod to skip injection
+  timezoneAnnotationKey: "kube-tz.io/name"             # per-Pod timezone override
+  statusAnnotationKey: "kube-tz.io/status"             # written by the policy: injected | skipped-invalid-timezone
+  injectedTimezoneAnnotationKey: "kube-tz.io/injected-timezone"
+
+  # Fail   = a CEL error rejects the Pod (strict, recommended once you have tested the policy)
+  # Ignore = a CEL error lets the Pod through un-mutated
+  failurePolicy: Fail
+  # Never | IfNeeded. IfNeeded re-runs the policy if another mutator changed the Pod afterwards.
+  reinvocationPolicy: IfNeeded
+  # Pod specs are immutable after creation, so CREATE is the only sensible operation.
+  operations:
+    - CREATE
+  allowedOSNames:
+    - linux
+
+  # Skip injection (and annotate the Pod) when the requested timezone name is not syntactically valid.
+  # Keep this enabled: the value ends up in a file path (subPath) inside the init container.
+  validateTimezone: true
+  # RE2 pattern. Dots are intentionally NOT allowed so ".." can never appear in the path.
+  # Single names (UTC, GMT, EST5EDT) and nested names (America/Argentina/Buenos_Aires) are both accepted.
+  timezonePattern: "^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*$"
+
+# Image that contains the tz database (and /bin/sh + cp for the default init script).
+image:
+  repository: quay.io/kube-tz/kube-tz
+  # Use chart version by default
+  tag: ""
+  pullPolicy: IfNotPresent
+
+  # Secrets added to the Pod's imagePullSecrets when the image lives in a private registry.
+  # Accepts plain names or {name: ...} objects. The Secrets must exist in every target namespace.
+  pullSecrets: []
+  # - my-registry-secret
+
+  # Location of the zoneinfo tree inside the image.
+  zoneInfoPath: "/opt/tzdata/usr/share/zoneinfo"
+
+# Copy zoneinfo from the node instead of from the image.
+# NOTE: hostPath volumes are rejected by the Pod Security "baseline" and "restricted" profiles,
+# and the node's zoneinfo may contain absolute symlinks that do not resolve inside the container.
+hostPath:
+  enabled: false
+  path: "/usr/share/zoneinfo"
+  type: "Directory"
+
+# The init container that populates the shared emptyDir.
+init:
+  name: "kube-tz"
+  # Override the default script. The script can rely on:
+  #   TIMEZONE      - the selected timezone name
+  #   ZONEINFO_SRC  - directory that contains the zoneinfo tree
+  #   /work         - writable volume; the full tree must end up here
+  command: []
+  resources:
+    requests:
+      cpu: "5m"
+      memory: "8Mi"
+    limits:
+      cpu: "50m"
+      memory: "32Mi"
+  # Defaults satisfy the Pod Security "restricted" profile.
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+volume:
+  name: "kube-tz"
+  # Where the full zoneinfo tree is mounted inside containers.
+  zoneInfoMountPath: "/usr/share/zoneinfo"
+  # Where the selected timezone file is mounted inside containers.
+  localtimeMountPath: "/etc/localtime"
+  # emptyDir size limit.
+  sizeLimit: "32Mi"
+
+# Also inject TZ + zoneinfo mounts into initContainers declared by the workload
+# (the kube-tz init container itself is always excluded).
+injectIntoInitContainers: false
+
+# Namespace targeting
+namespaces:
+  # Only inject into these namespaces. Empty = all namespaces (minus `exclude`).
+  include: []
+  # - my-app
+
+  # Never inject into these namespaces.
+  exclude:
+    - kube-system
+
+  # Label used to match namespaces by name (set automatically by Kubernetes >= 1.21).
+  nameLabelKey: "kubernetes.io/metadata.name"
+
+  # Advanced: a full LabelSelector. When set, it replaces include/exclude.
+  selector: {}
+  # matchLabels:
+  #   kube-tz.io/inject: "enabled"
+
+commonLabels: {}
