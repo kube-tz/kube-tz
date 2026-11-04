@@ -7,7 +7,7 @@ ARG ALPINE_VERSION=3.24
 # ---------------------------------------------------------------------------
 FROM alpine:${ALPINE_VERSION} AS src
 
-ARG tzdbversion=2026e
+ARG tzdbversion=2026f
 # Optional: pin the tarball checksum for reproducible, verified builds.
 #   docker build --build-arg tzdbsha256=<sha256 of tzdb-<version>.tar.lz> .
 ARG tzdbsha256=""
@@ -32,7 +32,7 @@ RUN mkdir -p /rootfs/bin && \
 # ---------------------------------------------------------------------------
 FROM scratch
 
-ARG tzdbversion=2026e
+ARG tzdbversion=2026f
 
 LABEL org.opencontainers.image.title="kube-tz" \
       org.opencontainers.image.description="tz database plus a static copy toolkit for the kube-tz Helm chart init container" \

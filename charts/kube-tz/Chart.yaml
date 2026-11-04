@@ -2,8 +2,8 @@ apiVersion: v2
 name: kube-tz
 description: Webhook-free timezone injection for Kubernetes workloads using MutatingAdmissionPolicy.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 icon: https://github.com/kube-tz/kube-tz/raw/main/assets/kube-tz-logo.png
 sources:
   - https://github.com/kube-tz/kube-tz
@@ -19,8 +19,8 @@ keywords:
   - cel
 annotations:
   artifacthub.io/changes: |
-    - kind: "added"
-      description: "initial chart"
+    - kind: "updated"
+      description: "bumped tzdb to 2026f"
   artifacthub.io/links: |
     - name: "source"
       url: "https://github.com/kube-tz/kube-tz"
