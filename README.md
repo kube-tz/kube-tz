@@ -86,37 +86,21 @@ timezone that was used.
 
 > Requires Kubernetes **1.36+** and Helm 3. See [Compatibility](#compatibility) for older clusters.
 
-**1. Build and push the image** that carries the tz database (once):
-
-```bash
-docker build -t <your-registry>/kube-tz:2026e .
-docker push <your-registry>/kube-tz:2026e
-```
-
-**2. Install the chart:**
+**1. Install the chart:**
 
 ```bash
 helm install kube-tz ./charts/kube-tz \
   --namespace kube-tz --create-namespace \
-  --set timezone=Europe/London \
-  --set image.repository=<your-registry>/kube-tz \
-  --set image.tag=2026e
+  --set timezone=Asia/Kolkata 
 ```
 
-**3. Try it:**
+**2. Try it:**
 
 ```bash
 kubectl run tz-test --image=busybox:1.37 --restart=Never -- sleep 3600
-kubectl exec tz-test -- date                  # prints GMT/BST
+kubectl exec tz-test -- date                  # prints IST
 kubectl get pod tz-test -o jsonpath='{.metadata.annotations}{"\n"}'
 kubectl delete pod tz-test
-```
-
-Once the chart is published you will be able to install it straight from a repository:
-
-```bash
-helm repo add kube-tz https://YOUR_ORG.github.io/kube-tz/
-helm install kube-tz kube-tz/kube-tz --set timezone=Europe/London
 ```
 
 Full installation, values and troubleshooting guide: **[charts/kube-tz/README.md](./charts/kube-tz/README.md)**.
@@ -162,7 +146,7 @@ metadata:
 spec:
   initContainers:
     - name: kube-tz                      # inserted first, runs before anything else
-      image: <your-registry>/kube-tz:2026e
+      image: <your-registry>/kube-tz:2026f
       env:
         - { name: TIMEZONE, value: Europe/London }
         - { name: ZONEINFO_SRC, value: /opt/tzdata/usr/share/zoneinfo }
@@ -357,23 +341,23 @@ kube-tz/
 ## Building the image
 
 ```bash
-# Default: tz database release 2026e
-docker build -t <your-registry>/kube-tz:2026e .
+# Default: tz database release 2026f
+docker build -t <your-registry>/kube-tz:2026f .
 
 # Pin the tarball checksum and choose the tz release
 docker build \
-  --build-arg tzdbversion=2026e \
-  --build-arg tzdbsha256=<sha256-of-tzdb-2026e.tar.lz> \
-  -t <your-registry>/kube-tz:2026e .
+  --build-arg tzdbversion=2026f \
+  --build-arg tzdbsha256=<sha256-of-tzdb-2026f.tar.lz> \
+  -t <your-registry>/kube-tz:2026f .
 
 # Multi-architecture
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t <your-registry>/kube-tz:2026e --push .
+  -t <your-registry>/kube-tz:2026f --push .
 ```
 
 | Build arg | Default | Description |
 |---|---|---|
-| `tzdbversion` | `2026e` | IANA tz database release |
+| `tzdbversion` | `2026f` | IANA tz database release |
 | `tzdbsha256` | *(empty)* | Verify the downloaded tarball when set |
 | `REDO` | `posix_only` | `posix_only` ships only the standard tree; `posix_right` also ships leap-second `right/` data |
 | `ALPINE_VERSION` | `3.24` | Alpine version used in the build stage |
@@ -398,7 +382,7 @@ helm template kube-tz charts/kube-tz --kube-version 1.36.0 | kubectl apply --dry
 # 3. Install on a test cluster
 helm install kube-tz charts/kube-tz -n kube-tz --create-namespace \
   --set timezone=Asia/Shanghai \
-  --set image.repository=<your-registry>/kube-tz --set image.tag=2026e
+  --set image.repository=<your-registry>/kube-tz --set image.tag=2026f
 
 # 4. Smoke test
 kubectl run tz-test --image=busybox:1.37 --restart=Never -- sleep 3600
